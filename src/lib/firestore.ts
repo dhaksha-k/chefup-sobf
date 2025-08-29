@@ -16,7 +16,7 @@ import { normalizeArchetype } from "../app/archetype";
 export interface PassPublic {
   uid: string;
   displayName?: string;
-  chefType?: string;        // slug, e.g. "Hustler"
+  chefType?: string;        // e.g. "Connector"
   email?: string;
   waitlistNumber?: number;
   wantsGigs?: boolean;
@@ -59,8 +59,23 @@ async function upsert(partial: Partial<ChefUser>) {
   );
 }
 
+/** Ensure the *current* user has a QR pass + public snapshot; return {slug,url}. */
+export const ensureQrPass = async (): Promise<{ slug: string; url: string }> => {
+  const userId = await uid();
+  return ensureQrPassFor(userId);
+};
+
+/** Tiny helper to keep the public pass in sync after any user write. */
+async function syncPublicPassForCurrentUser() {
+  try {
+    await ensureQrPass();
+  } catch {
+    /* ignore sync errors */}
+}
+
 /** Save the quiz result (slug) into the canonical field `chefType`. */
-export const saveArchetype = (slug: ChefType) => upsert({ chefType: slug });
+export const saveArchetype = (slug: ChefType) =>
+  upsert({ chefType: slug }).then(syncPublicPassForCurrentUser);
 
 /** Fetch typed user document or null (normalizes Legacy `archetype` → `chefType`). */
 export async function getUser(): Promise<ChefUser | null> {
@@ -78,23 +93,21 @@ export async function getUser(): Promise<ChefUser | null> {
   } as ChefUser;
 }
 
-/** Convenience helpers */
-export const saveQuizTags   = (tags: Partial<ChefUser>) => upsert(tags);
-export const saveProfile    = (data: Partial<ChefUser>) => upsert(data);
-export const saveProfileName = (displayName: string) => upsert({ displayName });
-export const markWelcome    = () => upsert({ welcomeComplete: true });
-export const markPrinted    = () => upsert({ printedCard: true });
+/** Convenience helpers (now auto-sync the public pass) */
+export const saveQuizTags    = (tags: Partial<ChefUser>) => upsert(tags).then(syncPublicPassForCurrentUser);
+export const saveProfile     = (data: Partial<ChefUser>) => upsert(data).then(syncPublicPassForCurrentUser);
+export const saveProfileName = (displayName: string)     => upsert({ displayName }).then(syncPublicPassForCurrentUser);
+export const markWelcome     = () => upsert({ welcomeComplete: true }).then(syncPublicPassForCurrentUser);
+export const markPrinted     = () => upsert({ printedCard: true }); // no public fields change
 
 /* ============================
    PRINT QUEUE — user + admin
    ============================ */
 
-/** User asks for a print — appears in admin queue as `pending`. */
 export const requestPrint = async () => {
   const userId = await uid();
   const userRef = doc(db, "users", userId);
-  // ensure a QR exists so preview/print works
-  await ensureQrPass();
+  await ensureQrPass(); // ensures pass exists for preview/print
   await setDoc(
     userRef,
     {
@@ -106,7 +119,6 @@ export const requestPrint = async () => {
   );
 };
 
-/** Admin approves a print request. */
 export const adminApprovePrint = async (targetUid: string) => {
   const ref = doc(db, "users", targetUid);
   const adminUid = getAuth().currentUser?.uid;
@@ -120,9 +132,9 @@ export const adminApprovePrint = async (targetUid: string) => {
     } as any,
     { merge: true }
   );
+  await ensureQrPassFor(targetUid); // keep pass fresh
 };
 
-/** Admin denies a print request. */
 export const adminDenyPrint = async (targetUid: string) => {
   const ref = doc(db, "users", targetUid);
   const adminUid = getAuth().currentUser?.uid;
@@ -138,7 +150,6 @@ export const adminDenyPrint = async (targetUid: string) => {
   );
 };
 
-/** Admin marks as printed (also sets `printedCard = true`). */
 export const adminMarkPrinted = async (targetUid: string) => {
   const ref = doc(db, "users", targetUid);
   await setDoc(
@@ -151,16 +162,13 @@ export const adminMarkPrinted = async (targetUid: string) => {
     } as any,
     { merge: true }
   );
+  await ensureQrPassFor(targetUid); // keep pass fresh
 };
 
 /* ============================
    EMAIL / WAITLIST
    ============================ */
 
-/**
- * Save email + assign a unique waitlistNumber ONCE using a transaction.
- * Counter doc: counters/waitlist
- */
 export const saveEmail = async (email: string): Promise<number> => {
   const userId = await uid();
   const userRef = doc(db, "users", userId);
@@ -169,7 +177,6 @@ export const saveEmail = async (email: string): Promise<number> => {
   const START_AT = 100;
 
   const result = await runTransaction(db, async (tx) => {
-    // If user already has a number, just update email and return it
     const userSnap = await tx.get(userRef);
     const existing = userSnap.exists()
       ? (userSnap.data() as ChefUser).waitlistNumber
@@ -184,7 +191,6 @@ export const saveEmail = async (email: string): Promise<number> => {
       return existing as number;
     }
 
-    // Read counter (init if missing)
     const counterSnap = await tx.get(counterRef);
     let next: number;
 
@@ -195,12 +201,10 @@ export const saveEmail = async (email: string): Promise<number> => {
       const parsed =
         typeof raw === "number" ? raw :
         typeof raw === "string" ? parseInt(raw, 10) : NaN;
-
       const current = Number.isFinite(parsed) ? parsed : START_AT - 1;
       next = current + 1;
     }
 
-    // Write new counter value and user assignment
     tx.set(
       counterRef,
       {
@@ -232,6 +236,7 @@ export const saveEmail = async (email: string): Promise<number> => {
     return next;
   });
 
+  await syncPublicPassForCurrentUser(); // keep /v/:slug in sync
   return result;
 };
 
@@ -245,59 +250,64 @@ function makeSlug(len = 8) {
     .join("");
 }
 
-/** Ensure the *current* user has a QR pass + public snapshot; return {slug,url}. */
-export const ensureQrPass = async (): Promise<{ slug: string; url: string }> => {
-  const userId = await uid();
-  return ensureQrPassFor(userId);
-};
-
-/** Ensure *another* user (by uid) has a QR pass — handy for admin preview/print. */
-export const ensureQrPassFor = async (targetUid: string): Promise<{ slug: string; url: string }> => {
+/** Ensure *another* user (by uid) has a QR pass — returns {slug,url} and
+ *  always refreshes the public snapshot with the latest user fields. */
+export const ensureQrPassFor = async (
+  targetUid: string
+): Promise<{ slug: string; url: string }> => {
   const userRef = doc(db, "users", targetUid);
   const userSnap = await getDoc(userRef);
   const u = (userSnap.exists() ? (userSnap.data() as any) : {}) as ChefUser & Record<string, any>;
 
-  // Reuse slug if present; otherwise mint one
-  let slug: string | undefined = u.qrSlug;
-  if (!slug) slug = makeSlug(8);
+  // Reuse slug if present; else mint a new one
+  let slug: string = (u.qrSlug as string) || makeSlug(8);
 
+  // Avoid a rare collision if we just minted a slug that already exists
   let passRef = doc(db, "passes", slug);
-  // very rare collision if slug was just minted
-  if (!u.qrSlug && (await getDoc(passRef)).exists()) {
+  let passSnap = await getDoc(passRef);
+  if (!u.qrSlug && passSnap.exists()) {
     slug = makeSlug(10);
     passRef = doc(db, "passes", slug);
+    passSnap = await getDoc(passRef);
   }
 
+  // Canonical public URL
   const origin =
     (typeof window !== "undefined" && window.location?.origin) ||
     "https://your-app.example.com";
   const url = `${origin}/v/${slug}`;
 
-  // Normalize chef type from either chefType or Legacy archetype
-  const chefSlug =
-    normalizeArchetype((u as any).chefType) ?? normalizeArchetype((u as any).archetype);
+  // Normalize archetype once
+  const chefSlug: string | undefined =
+    normalizeArchetype(u.chefType) ?? normalizeArchetype(u.archetype) ?? undefined;
 
   // Preserve createdAt if pass exists
-  const passSnap = await getDoc(passRef);
-  const existingCreatedAt = passSnap.exists() ? (passSnap.data() as any).createdAt : undefined;
+  const existingCreatedAt = passSnap.exists() ? (passSnap.data() as any)?.createdAt : undefined;
 
-  // Public snapshot: ONLY include fields safe to expose
+  // Build refreshed public snapshot (avoid empty strings)
+  const displayName = (u.displayName || "").trim() || "Chef";
+  const email = (u.email || "").trim();
+  const waitlistNumber =
+    typeof u.waitlistNumber === "number" && Number.isFinite(u.waitlistNumber)
+      ? u.waitlistNumber
+      : undefined;
+
   const passData: PassPublic = {
     uid: targetUid,
-    displayName: u.displayName ?? "",
-    chefType: chefSlug ?? undefined,
-    email: u.email ?? undefined,
-    waitlistNumber: u.waitlistNumber ?? undefined,
-    wantsGigs: (u as any).wantsGigs ?? undefined,
-    wantsSell: (u as any).wantsSell ?? undefined,
-    chefFarmerConnect: (u as any).chefFarmerConnect ? true : undefined,
+    displayName,
+    chefType: chefSlug || undefined,
+    email: email || undefined,
+    waitlistNumber,
+    wantsGigs: u.wantsGigs === true ? true : undefined,
+    wantsSell: u.wantsSell === true ? true : undefined,
+    chefFarmerConnect: u.chefFarmerConnect === true ? true : undefined,
     createdAt: existingCreatedAt ?? serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
 
   await setDoc(passRef, passData, { merge: true });
 
-  // Store slug/url on user for reuse
+  // Also store slug/url on user for reuse
   await setDoc(
     userRef,
     { qrSlug: slug, qrUrl: url, updatedAt: serverTimestamp() } as Partial<ChefUser>,
@@ -334,7 +344,7 @@ export const ensureWaitlistNumber = async (): Promise<number> => {
   const counterRef = doc(db, "counters", "waitlist");
   const START_AT = 100;
 
-  return runTransaction(db, async (tx) => {
+  const next = await runTransaction(db, async (tx) => {
     const userSnap = await tx.get(userRef);
     const existing = userSnap.exists()
       ? (userSnap.data() as any).waitlistNumber
@@ -342,24 +352,24 @@ export const ensureWaitlistNumber = async (): Promise<number> => {
     if (existing != null) return existing as number;
 
     const counterSnap = await tx.get(counterRef);
-    let next: number;
+    let value: number;
     if (!counterSnap.exists()) {
-      next = START_AT; // first assignment
+      value = START_AT; // first assignment
       tx.set(
         counterRef,
-        { value: next, createdAt: serverTimestamp(), updatedAt: serverTimestamp() },
+        { value, createdAt: serverTimestamp(), updatedAt: serverTimestamp() },
         { merge: true }
       );
     } else {
       const curr = (counterSnap.data() as any).value ?? START_AT - 1;
-      next = Number(curr) + 1;
-      tx.set(counterRef, { value: next, updatedAt: serverTimestamp() }, { merge: true });
+      value = Number(curr) + 1;
+      tx.set(counterRef, { value, updatedAt: serverTimestamp() }, { merge: true });
     }
 
     tx.set(
       userRef,
       {
-        waitlistNumber: next,
+        waitlistNumber: value,
         updatedAt: serverTimestamp(),
         createdAt: userSnap.exists()
           ? (userSnap.data() as any).createdAt
@@ -368,6 +378,9 @@ export const ensureWaitlistNumber = async (): Promise<number> => {
       { merge: true }
     );
 
-    return next;
+    return value;
   });
+
+  await syncPublicPassForCurrentUser(); // keep /v/:slug accurate
+  return next;
 };
