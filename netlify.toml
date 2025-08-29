@@ -2,7 +2,10 @@
   command = "npm run build"
   publish = "dist"
 
+<<<<<<< HEAD
 # Ensure client-side routing works
+=======
+>>>>>>> 1ef590e35318210b17d9fa9ae145e84cdf3bd308
 [[redirects]]
   from = "/*"
   to = "/index.html"
