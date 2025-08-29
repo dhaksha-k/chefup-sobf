@@ -1,253 +1,384 @@
-import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import QRCode from "qrcode.react";
-import { useReactToPrint } from "react-to-print";
-import {
-  getUser,
-  getUserByUid,
-  ensureQrPass,
-  ensureQrPassFor,
-  markPrinted,
-} from "../lib/firestore";
-import { normalizeArchetype } from "../app/archetype";
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  updateDoc,
-  serverTimestamp,
-} from "firebase/firestore";
+import { useEffect, useState } from "react";
+import { useParams } from "react-router-dom";
+import Shell from "../components/Shell";
+import { chefTitle, normalizeArchetype } from "../app/archetype";
+import { getPublicPass, type PassPublic } from "../lib/firestore";
 
-/** SCREEN PREVIEW ONLY (hidden when printing) */
-const cardMap = import.meta.glob("../assets/cards/*_front.png", {
-  eager: true,
-  as: "url",
-}) as Record<string, string>;
-const cardFor = (slug: string) => cardMap[`../assets/cards/${slug}_front.png`];
+// ---------- THEME MAP (tweak hexes anytime) ----------
+type Theme = {
+    headerFrom: string;
+    headerTo: string;
+    accentText: string;
+    buttonBg: string;
+    buttonText: string;
+    buttonHoverOpacity?: number; // 0..1 (defaults 0.92)
+    calloutBg: string; // subtle tinted background
+    calloutBorder: string;
+};
 
-// Overlay boxes in % of the 4×6 canvas
-const NAME_BOX = { x: 8, y: 36, w: 84, h: 11 };
-const QR_BOX   = { x: 9, y: 70, w: 28, h: 24 };
-
-// Ensure QR URLs are absolute
-function toPublicUrl(urlOrPath?: string | null) {
-  if (!urlOrPath) return "";
-  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
-  return new URL(urlOrPath, window.location.origin).toString();
+function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
+    switch (t) {
+        case "connector":
+            return {
+                headerFrom: "#0B6E75",
+                headerTo: "#21C4CF",
+                accentText: "#0B8E95",
+                buttonBg: "#0B6E75",
+                buttonText: "#FFFFFF",
+                calloutBg: "#E6FAFB",
+                calloutBorder: "#9DE8EE",
+            };
+        case "hustler":
+            return {
+                headerFrom: "#033B34",
+                headerTo: "#0C5B53",
+                accentText: "#2BCB9A",
+                buttonBg: "#0C5B53",
+                buttonText: "#FFFFFF",
+                calloutBg: "#E9FBF5",
+                calloutBorder: "#B6F5DF",
+            };
+        case "innovator":
+            return {
+                headerFrom: "#4D0C55",
+                headerTo: "#A01E73",
+                accentText: "#F871A0",
+                buttonBg: "#6E1767",
+                buttonText: "#FFFFFF",
+                calloutBg: "#FEEDF5",
+                calloutBorder: "#FBC6DC",
+            };
+        case "legacy":
+            return {
+                headerFrom: "#5A2A14",
+                headerTo: "#8A451E",
+                accentText: "#F3C8A6",
+                buttonBg: "#6E351B",
+                buttonText: "#1B100B",
+                calloutBg: "#FFF4EC",
+                calloutBorder: "#FFDCC6",
+            };
+        case "nomad":
+            return {
+                headerFrom: "#F28A00",
+                headerTo: "#FFB23A",
+                accentText: "#7A3E00",
+                buttonBg: "#C96500",
+                buttonText: "#FFFFFF",
+                calloutBg: "#FFF3E0",
+                calloutBorder: "#FFD699",
+            };
+        case "storyteller":
+            return {
+                headerFrom: "#2B0D59",
+                headerTo: "#6C2CB1",
+                accentText: "#C77DFF",
+                buttonBg: "#4B1989",
+                buttonText: "#FFFFFF",
+                calloutBg: "#F7EDFF",
+                calloutBorder: "#E6C9FF",
+            };
+        case "chefpreneur":
+            return {
+                headerFrom: "#0F2131",
+                headerTo: "#1A2E40",
+                accentText: "#E7CD95",
+                buttonBg: "#1A2E40",
+                buttonText: "#E7CD95",
+                calloutBg: "#FBF6E7",
+                calloutBorder: "#F2E2B7",
+            };
+        case "community":
+            return {
+                headerFrom: "#C24C12",
+                headerTo: "#E97717",
+                accentText: "#FFB340",
+                buttonBg: "#C24C12",
+                buttonText: "#FFFFFF",
+                calloutBg: "#FFF4E8",
+                calloutBorder: "#FFD7A6",
+            };
+        default:
+            return {
+                headerFrom: "#334155",  // slate
+                headerTo: "#64748B",
+                accentText: "#0EA5E9",
+                buttonBg: "#0F172A",
+                buttonText: "#FFFFFF",
+                calloutBg: "#F1F5F9",
+                calloutBorder: "#E2E8F0",
+            };
+    }
 }
 
-export default function PrintCard() {
-  const [params] = useSearchParams();
-  const uidParam = params.get("user") ?? params.get("uid") ?? null;
-  const jobId = params.get("job"); // if opened from Admin queue
+export default function PublicCard() {
+    const { slug } = useParams<{ slug: string }>();
+    const [data, setData] = useState<PassPublic | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [copied, setCopied] = useState<"email" | "link" | null>(null);
 
-  const [displayName, setDisplayName] = useState("Chef");
-  const [type, setType] = useState("Connector");
-  const [qrUrl, setQrUrl] = useState("");
-  const [ready, setReady] = useState(false);
-  const [printing, setPrinting] = useState(false);
-  const [bgUrl, setBgUrl] = useState<string | null>(null);
+    useEffect(() => {
+        (async () => {
+            if (!slug) return;
+            const d = await getPublicPass(slug);
+            setData(d);
+            setLoading(false);
+        })();
+    }, [slug]);
 
-  const cardRef = useRef<HTMLDivElement>(null);
-  const nameRef = useRef<HTMLDivElement>(null);
-
-  const handlePrint = useReactToPrint({
-    content: () => cardRef.current!,
-    onBeforePrint: () => setPrinting(true),
-    onAfterPrint: async () => {
-      try {
-        // If launched from Admin queue, flip job to printed
-        if (jobId) {
-          const db = getFirestore();
-          await updateDoc(doc(db, "printJobs", jobId), {
-            status: "printed",
-            updatedAt: serverTimestamp(),
-          });
-        }
-        // Optional per-user marker
-        // @ts-ignore (helper may accept optional uid)
-        await markPrinted(uidParam || undefined);
-      } finally {
-        setPrinting(false);
-      }
-    },
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setReady(false);
-      const db = getFirestore();
-
-      // 1) Preferred path: load from the printJobs doc (works with your rules)
-      if (jobId) {
-        try {
-          const snap = await getDoc(doc(db, "printJobs", jobId));
-          if (snap.exists()) {
-            const j = snap.data() as any;
-            const slug = normalizeArchetype(j?.chefType) || "Connector";
-            const maybeUrl = toPublicUrl(j?.qrUrl);
-            setDisplayName(j?.displayName || "Chef");
-            setType(slug);
-            setBgUrl(cardFor(slug) || cardFor("Connector"));
-
-            if (maybeUrl) {
-              setQrUrl(maybeUrl);
-            } else if (j?.uid) {
-              // generate + persist missing QR url
-              const { url } = await ensureQrPassFor(j.uid);
-              const full = toPublicUrl(url);
-              setQrUrl(full);
-              try {
-                await updateDoc(doc(db, "printJobs", jobId), {
-                  qrUrl: full,
-                  updatedAt: serverTimestamp(),
-                });
-              } catch {}
-            }
-            if (!cancelled) setReady(true);
-            return;
-          }
-        } catch {
-          // fall through to uid/self paths
-        }
-      }
-
-      // 2) Admin provided a uid directly (may fail due to users rules)
-      if (uidParam) {
-        try {
-          const u = await getUserByUid(uidParam);
-          const slug = normalizeArchetype(u?.chefType) || "Connector";
-          const { url } = await ensureQrPassFor(uidParam);
-          setDisplayName(u?.displayName || "Chef");
-          setType(slug);
-          setQrUrl(toPublicUrl(url));
-          setBgUrl(cardFor(slug) || cardFor("Connector"));
-          if (!cancelled) setReady(true);
-          return;
-        } catch {
-          // If rules block /users, we’ll still render name="Chef" and no QR
-        }
-      }
-
-      // 3) Self-print (current authed user)
-      try {
-        const u = await getUser();
-        const slug = normalizeArchetype(u?.chefType) || "Connector";
-        const { url } = await ensureQrPass();
-        setDisplayName(u?.displayName || "Chef");
-        setType(slug);
-        setQrUrl(toPublicUrl(url));
-        setBgUrl(cardFor(slug) || cardFor("Connector"));
-      } finally {
-        if (!cancelled) setReady(true);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [uidParam, jobId]);
-
-  // Auto-shrink the name to fit the pill
-  useEffect(() => {
-    const el = nameRef.current;
-    if (!el) return;
-    let size = 56;
-    el.style.fontSize = `${size}px`;
-    el.style.lineHeight = "1.08";
-    el.style.fontWeight = "700";
-    const fits = () => el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight;
-    while (size > 18 && !fits()) {
-      size -= 1;
-      el.style.fontSize = `${size}px`;
+    if (loading) {
+        return (
+            <Shell title="Loading…" subtitle="">
+                <div className="py-12 text-center text-gray-500">Loading…</div>
+            </Shell>
+        );
     }
-  }, [displayName, type, ready]);
+    if (!data) {
+        return (
+            <Shell title="Not found" subtitle="This link may be invalid or expired.">
+                <div className="py-12 text-center text-gray-600">We couldn’t find that pass.</div>
+            </Shell>
+        );
+    }
 
-  return (
-    <div className="min-h-screen grid place-items-center p-6">
-      <div ref={cardRef} className="print-card relative">
-        {/* Screen preview background (hidden when printing) */}
-        {bgUrl && (
-          <img
-            src={bgUrl}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover screen-only"
-            draggable={false}
-          />
-        )}
+    const t = normalizeArchetype(data.chefType);
+    const theme = getTheme(t);
+    const title = chefTitle(t);
 
-        {/* Name overlay */}
-        <div
-          className="absolute flex items-center justify-center px-6 text-center select-none"
-          style={{
-            left: `${NAME_BOX.x}%`,
-            top: `${NAME_BOX.y}%`,
-            width: `${NAME_BOX.w}%`,
-            height: `${NAME_BOX.h}%`,
-            fontWeight: 700,
-            color: "#1a1a1a",
-          }}
-        >
-          <div ref={nameRef} className="w-full truncate">{displayName}</div>
-        </div>
+    // Build the single-line collaboration focus text
+    const focus =
+        [
+            data.chefFarmerConnect ? "Partnering with farms" : null,
+            data.wantsGigs ? "Open to gigs" : null,
+            data.wantsSell ? "Selling produce/products" : null,
+        ].filter(Boolean).join(" • ") || "—";
 
-        {/* QR + URL overlay */}
-        <div
-          className="absolute"
-          style={{
-            left: `${QR_BOX.x}%`,
-            top: `${QR_BOX.y}%`,
-            width: `${QR_BOX.w}%`,
-            height: `${QR_BOX.h}%`,
-          }}
-        >
-          <div className="w-full h-full flex flex-col items-center justify-center">
-            {qrUrl ? (
-              <>
-                <div style={{ width: "74%", aspectRatio: "1 / 1" }}>
-                  <QRCode
-                    value={qrUrl}
-                    size={1024}
-                    style={{ width: "100%", height: "100%" }}
-                    includeMargin={false}
-                  />
-                </div>
+
+    // vCard content
+    const vcard = buildVCard({
+        name: data.displayName || "ChefUp Contact",
+        email: data.email || "",
+        title,
+        notes: [
+            data.waitlistNumber ? `Waitlist #${data.waitlistNumber}` : null,
+            t ? `Type: ${title}` : null,
+            data.wantsGigs ? "Open to gigs" : null,
+            data.wantsSell ? "Selling produce/products" : null,
+            data.chefFarmerConnect ? "Interested in partnering with farms" : null,
+            "Shared via ChefUp by FarmdOut",
+        ]
+            .filter(Boolean)
+            .join("\n"),
+    });
+
+    const downloadVcf = () => {
+        const blob = new Blob([vcard], { type: "text/vcard;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const safeName = (data.displayName || "chefup-contact").replace(/[^\w\-]+/g, "_");
+        a.href = url;
+        a.download = `${safeName}.vcf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    };
+
+    const copyEmail = async () => {
+        if (!data.email) return;
+        try {
+            await navigator.clipboard?.writeText(data.email);
+            setCopied("email");
+            setTimeout(() => setCopied(null), 1200);
+        } catch { }
+    };
+
+    const shareLink = async () => {
+        const url = window.location.href;
+        try {
+            if (navigator.share) {
+                await navigator.share({ title: `${data.displayName} — ${title}`, text: "ChefUp contact", url });
+            } else {
+                await navigator.clipboard?.writeText(url);
+                setCopied("link");
+                setTimeout(() => setCopied(null), 1200);
+            }
+        } catch { }
+    };
+
+    return (
+        <Shell title="">
+            <div className="mx-auto max-w-xl overflow-hidden rounded-3xl bg-white shadow-xl">
+                {/* Header */}
                 <div
-                  className="mt-1 text-center break-all"
-                  style={{ fontSize: "10px", lineHeight: 1.1, color: "#2b2b2b", opacity: 0.9 }}
-                  title={qrUrl}
-                >
-                  {qrUrl.replace(/^https?:\/\/(www\.)?/, "")}
+                    className="h-24"
+                    style={{
+                        backgroundImage: `linear-gradient(90deg, ${theme.headerFrom}, ${theme.headerTo})`,
+                    }}
+                />
+
+                {/* Body */}
+                <div className="p-6 sm:p-8 -mt-12">
+                    {/* Avatar */}
+                    <div className="mx-auto w-24 h-24 rounded-2xl bg-white shadow-lg grid place-items-center text-3xl font-bold">
+                        <span>{initials(data.displayName || "Chef")}</span>
+                    </div>
+
+                    {/* Title block */}
+                    <div className="mt-4 text-center">
+                        <div className="text-sm text-slate-500">ChefUp by FarmdOut</div>
+                        <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+                            {data.displayName || "Chef"}
+                        </h1>
+                        <div className="mt-1 text-sm font-medium" style={{ color: theme.accentText }}>
+                            {title}
+                        </div>
+                    </div>
+
+                    {/* Farmer connect callout (if enabled) */}
+                    {data.chefFarmerConnect && (
+                        <div
+                            className="mt-6 rounded-2xl p-4 border"
+                            style={{ backgroundColor: theme.calloutBg, borderColor: theme.calloutBorder }}
+                        >
+                            <div className="flex items-start gap-3">
+                                <div className="text-xl">🌱</div>
+                                <div>
+                                    <div className="text-sm font-semibold" style={{ color: theme.accentText }}>
+                                        Open to partnering with farms
+                                    </div>
+                                    <div className="text-sm" style={{ color: theme.accentText }}>
+                                        This chef is interested in connecting directly with farmers.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Info rows */}
+                    <div className="mt-6 space-y-3">
+                        <InfoRow label="WAITLIST NUMBER">
+                            <span
+                                className="text-4xl font-extrabold tracking-tight leading-none"
+                                style={{ color: theme.accentText }}
+                            >
+                                {data.waitlistNumber ?? "—"}
+                            </span>
+                        </InfoRow>
+
+                        <InfoRow
+                            label="EMAIL"
+                            rightSlot={
+                                data.email ? (
+                                    <button
+                                        onClick={copyEmail}
+                                        className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium hover:opacity-95 active:translate-y-px transition"
+                                        style={{ backgroundColor: theme.buttonBg, color: theme.buttonText }}
+                                        aria-label="Copy email"
+                                    >
+                                        Copy
+                                    </button>
+                                ) : undefined
+                            }
+                        >
+                            {data.email ? (
+                                <a className="underline break-all" href={`mailto:${data.email}`}>
+                                    {data.email}
+                                </a>
+                            ) : (
+                                <span className="text-slate-400">—</span>
+                            )}
+                        </InfoRow>
+
+                        <InfoRow label="COLLABORATION FOCUS">
+                            <span>{focus}</span>
+                        </InfoRow>
+
+                    </div>
+
+                    {/* Actions */}
+                    <div className="mt-6 grid grid-cols-2 gap-3">
+                        <button
+                            onClick={downloadVcf}
+                            className="rounded-xl py-3 px-4 text-sm font-medium shadow-sm hover:opacity-95 active:translate-y-px transition"
+                            style={{ backgroundColor: theme.buttonBg, color: theme.buttonText }}
+                            title="Download .vcf to add to Contacts"
+                        >
+                            📇 Add to contacts
+                        </button>
+
+                        <button
+                            onClick={shareLink}
+                            className="rounded-xl py-3 px-4 text-sm font-medium shadow-sm hover:opacity-95 active:translate-y-px transition"
+                            style={{ backgroundColor: theme.buttonBg, color: theme.buttonText }}
+                            title="Share this profile"
+                        >
+                            🔗 Share
+                        </button>
+                    </div>
+
+                    {/* Tiny toasts */}
+                    <div className="mt-2 h-5 text-center text-xs" style={{ color: theme.accentText }}>
+                        {copied === "email" && "Email copied!"}
+                        {copied === "link" && "Link copied!"}
+                    </div>
                 </div>
-              </>
-            ) : (
-              <div className="w-full h-full grid place-items-center text-xs text-gray-400 border border-dashed">
-                QR…
-              </div>
-            )}
-          </div>
+            </div>
+        </Shell>
+    );
+}
+
+/* ---------- helpers ---------- */
+
+function initials(name: string) {
+    return name
+        .split(/\s+/)
+        .map((s) => s[0]?.toUpperCase())
+        .filter(Boolean)
+        .slice(0, 2)
+        .join("");
+}
+
+function buildVCard(opts: { name: string; email?: string; title?: string; notes?: string }) {
+    const esc = (s?: string) =>
+        String(s || "")
+            .replace(/\\/g, "\\\\")
+            .replace(/\n/g, "\\n")
+            .replace(/,/g, "\\,")
+            .replace(/;/g, "\\;");
+    const lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        `FN:${esc(opts.name)}`,
+        opts.email ? `EMAIL;TYPE=INTERNET:${esc(opts.email)}` : "",
+        opts.title ? `TITLE:${esc(opts.title)}` : "",
+        `ORG:ChefUp by FarmdOut`,
+        opts.notes ? `NOTE:${esc(opts.notes)}` : "",
+        "END:VCARD",
+    ].filter(Boolean);
+    return lines.join("\n");
+}
+
+function InfoRow({
+    label,
+    children,
+    rightSlot,
+}: {
+    label: string;
+    children: React.ReactNode;
+    rightSlot?: React.ReactNode;
+}) {
+    return (
+        <div className="rounded-2xl border border-slate-200 p-4">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                    <div className="text-[11px] font-semibold tracking-wider text-slate-500">
+                        {label}
+                    </div>
+                    <div className="mt-1 text-[15px] text-slate-800">{children}</div>
+                </div>
+                {rightSlot}
+            </div>
         </div>
-      </div>
-
-      <button
-        className="no-print mt-6 w-[360px] rounded-lg bg-black text-white py-3 font-medium shadow-sm hover:opacity-95 active:translate-y-px transition disabled:opacity-50"
-        onClick={() => handlePrint?.()}
-        disabled={!ready || printing}
-      >
-        {printing ? "Printing…" : "Print overlays"}
-      </button>
-
-      <style>{`
-        .print-card { width: 4in; height: 6in; border-radius: 0; overflow: hidden; background: transparent; box-shadow: 0 10px 30px rgba(0,0,0,.12); }
-        @page { size: 4in 6in; margin: 0; }
-        @media print {
-          .no-print { display: none !important; }
-          .screen-only { display: none !important; }
-          body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .print-card { box-shadow: none; }
-        }
-      `}</style>
-    </div>
-  );
+    );
 }
