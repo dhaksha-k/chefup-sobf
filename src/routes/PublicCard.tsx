@@ -18,7 +18,7 @@ type Theme = {
 
 function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
     switch (t) {
-        case "connector":
+        case "Connector":
             return {
                 headerFrom: "#0B6E75",
                 headerTo: "#21C4CF",
@@ -28,7 +28,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#E6FAFB",
                 calloutBorder: "#9DE8EE",
             };
-        case "hustler":
+        case "Hustler":
             return {
                 headerFrom: "#033B34",
                 headerTo: "#0C5B53",
@@ -38,7 +38,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#E9FBF5",
                 calloutBorder: "#B6F5DF",
             };
-        case "innovator":
+        case "Innovator":
             return {
                 headerFrom: "#4D0C55",
                 headerTo: "#A01E73",
@@ -48,7 +48,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#FEEDF5",
                 calloutBorder: "#FBC6DC",
             };
-        case "legacy":
+        case "Legacy":
             return {
                 headerFrom: "#5A2A14",
                 headerTo: "#8A451E",
@@ -58,7 +58,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#FFF4EC",
                 calloutBorder: "#FFDCC6",
             };
-        case "nomad":
+        case "Nomad":
             return {
                 headerFrom: "#F28A00",
                 headerTo: "#FFB23A",
@@ -68,7 +68,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#FFF3E0",
                 calloutBorder: "#FFD699",
             };
-        case "storyteller":
+        case "Storyteller":
             return {
                 headerFrom: "#2B0D59",
                 headerTo: "#6C2CB1",
@@ -78,7 +78,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#F7EDFF",
                 calloutBorder: "#E6C9FF",
             };
-        case "chefpreneur":
+        case "Chefpreneur":
             return {
                 headerFrom: "#0F2131",
                 headerTo: "#1A2E40",
@@ -88,7 +88,7 @@ function getTheme(t?: ReturnType<typeof normalizeArchetype>): Theme {
                 calloutBg: "#FBF6E7",
                 calloutBorder: "#F2E2B7",
             };
-        case "community":
+        case "Community":
             return {
                 headerFrom: "#C24C12",
                 headerTo: "#E97717",
