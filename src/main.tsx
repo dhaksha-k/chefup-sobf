@@ -35,6 +35,8 @@ const router = createBrowserRouter([
   { path: "/admin", element: <AdminGate><AdminPrintList /></AdminGate> },
   { path: "/print", element: <AdminGate><PrintCard /></AdminGate> },
 
+  // compat for old QR links
+{ path: "/p/:slug", element: <Navigate to="/v/:slug" replace /> },
   // ----- CATCH-ALL (KEEP LAST) -----
   { path: "*", element: <Navigate to="/" replace /> },
 ]);
