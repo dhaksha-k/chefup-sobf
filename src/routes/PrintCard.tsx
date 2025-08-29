@@ -36,21 +36,19 @@ function toPublicUrl(urlOrPath?: string | null) {
   return new URL(urlOrPath, window.location.origin).toString();
 }
 
-// ✅ NEW: builder for the public profile URL (slug-based)
+// ✅ builder for the public profile URL (slug-based) — uses /v/
 function publicProfileUrlFromSlug(slug: string) {
-  // change /p/ to your actual public route if needed (e.g., /card/)
-  return new URL(`/p/${slug}`, window.location.origin).toString();
+  return new URL(`/v/${slug}`, window.location.origin).toString();
 }
 
-// ✅ OPTIONAL: try to pull a slug out of any existing URL if your ensureFns don't return one
+// try to pull a slug out of any existing URL
 function tryInferSlugFromUrl(url?: string | null) {
   if (!url) return undefined;
   try {
     const u = new URL(toPublicUrl(url));
     const parts = u.pathname.split("/").filter(Boolean);
-    // supports /p/<slug> or /card/<slug>
-    const pIdx = parts.findIndex((p) => p === "p" || p === "card");
-    if (pIdx >= 0 && parts[pIdx + 1]) return parts[pIdx + 1];
+    const idx = parts.findIndex((p) => p === "v" || p === "p" || p === "card");
+    if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
   } catch {}
   return undefined;
 }
@@ -71,7 +69,7 @@ export default function PrintCard() {
   const nameRef = useRef<HTMLDivElement>(null);
 
   const handlePrint = useReactToPrint({
-    content: () => cardRef.current!,
+    content: () => cardRef.current, // return element or null; library handles it
     onBeforePrint: () => setPrinting(true),
     onAfterPrint: async () => {
       try {
@@ -82,7 +80,7 @@ export default function PrintCard() {
             updatedAt: serverTimestamp(),
           });
         }
-        // @ts-ignore (helper may accept optional uid)
+        // @ts-ignore helper can accept optional uid
         await markPrinted(uidParam || undefined);
       } finally {
         setPrinting(false);
@@ -102,19 +100,27 @@ export default function PrintCard() {
           const snap = await getDoc(doc(db, "printJobs", jobId));
           if (snap.exists()) {
             const j = snap.data() as any;
-            const slug = normalizeArchetype(j?.chefType) || "Connector";
+            const chefSlug = normalizeArchetype(j?.chefType) || "Connector";
             setDisplayName(j?.displayName || "Chef");
-            setType(slug);
-            setBgUrl(cardFor(slug) || cardFor("Connector"));
+            setType(chefSlug);
+            setBgUrl(cardFor(chefSlug) || cardFor("Connector"));
 
-            // ✅ get or mint a public-pass SLUG, then build the public URL
+            // get or mint a public-pass SLUG, then build the public URL
             let passSlug: string | undefined =
-              j?.passSlug ||
-              tryInferSlugFromUrl(j?.qrUrl);
+              j?.passSlug || tryInferSlugFromUrl(j?.qrUrl);
 
+            // prefer job.uid if present
             if (!passSlug && j?.uid) {
               try {
-                const res = await ensureQrPassFor(j.uid); // expect res.slug (prefer)
+                const res = await ensureQrPassFor(j.uid);
+                passSlug = res?.slug || tryInferSlugFromUrl(res?.url);
+              } catch {}
+            }
+
+            // 🔁 fallback: if job has NO uid but URL has ?uid=, try that
+            if (!passSlug && !j?.uid && uidParam) {
+              try {
+                const res = await ensureQrPassFor(uidParam);
                 passSlug = res?.slug || tryInferSlugFromUrl(res?.url);
               } catch {}
             }
@@ -122,8 +128,7 @@ export default function PrintCard() {
             if (passSlug) {
               const publicUrl = publicProfileUrlFromSlug(passSlug);
               setQrUrl(publicUrl);
-
-              // persist so future prints are instant
+              // persist for future prints
               try {
                 await updateDoc(doc(db, "printJobs", jobId), {
                   passSlug,
@@ -147,12 +152,11 @@ export default function PrintCard() {
       if (uidParam) {
         try {
           const u = await getUserByUid(uidParam);
-          const slug = normalizeArchetype(u?.chefType) || "Connector";
+          const chefSlug = normalizeArchetype(u?.chefType) || "Connector";
           setDisplayName(u?.displayName || "Chef");
-          setType(slug);
-          setBgUrl(cardFor(slug) || cardFor("Connector"));
+          setType(chefSlug);
+          setBgUrl(cardFor(chefSlug) || cardFor("Connector"));
 
-          // ✅ mint/find slug → build public URL
           let passSlug: string | undefined;
           try {
             const res = await ensureQrPassFor(uidParam);
@@ -170,12 +174,11 @@ export default function PrintCard() {
       // ---------- 3) Self-print (current authed user) ----------
       try {
         const u = await getUser();
-        const slug = normalizeArchetype(u?.chefType) || "Connector";
+        const chefSlug = normalizeArchetype(u?.chefType) || "Connector";
         setDisplayName(u?.displayName || "Chef");
-        setType(slug);
-        setBgUrl(cardFor(slug) || cardFor("Connector"));
+        setType(chefSlug);
+        setBgUrl(cardFor(chefSlug) || cardFor("Connector"));
 
-        // ✅ mint/find slug → build public URL
         let passSlug: string | undefined;
         try {
           const res = await ensureQrPass();
@@ -275,8 +278,8 @@ export default function PrintCard() {
 
       <button
         className="no-print mt-6 w-[360px] rounded-lg bg-black text-white py-3 font-medium shadow-sm hover:opacity-95 active:translate-y-px transition disabled:opacity-50"
-        onClick={() => handlePrint?.()}
-        disabled={!ready || printing}
+        onClick={handlePrint}               // ← call directly
+        disabled={printing}                 // ← don't over-block on !ready
       >
         {printing ? "Printing…" : "Print overlays"}
       </button>
