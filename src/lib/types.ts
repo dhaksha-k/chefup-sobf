@@ -25,4 +25,9 @@ export type ChefUser = {
   deniedBy?: string;
   printedAt?: any;
 
+    // add these so printJobs.ts compiles
+  qrUrl?: string;   // absolute or relative URL to the QR pass
+  qrSlug?: string;  // optional slug you can turn into /v/<slug>
+  
+
 };
