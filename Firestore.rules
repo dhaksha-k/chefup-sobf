@@ -1,0 +1,26 @@
+// DEV rules for your flow
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Each user can read/write only their own doc
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Global waitlist counter (used only by your client TX)
+    match /counters/waitlist {
+      allow read: if true;
+      // allow create (first time) and updates by any authenticated user
+      allow create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // Optional: public QR pass lookups
+    match /passes/{slug} {
+      allow read: if true;
+      allow write: if request.auth != null;
+      allow delete: if false;
+    }
+  }
+}
